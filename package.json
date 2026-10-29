@@ -1,0 +1,57 @@
+{
+  "name": "cortico-world-screen-companion",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cortico World: 屏幕陪伴桌宠 —— 桌宠主动截屏当前画面，把截图作为图片附件交给宿主多模态模型，结合用户的问题自然回答。通用屏幕观察能力，不预设用户在看什么。",
+  "license": "MIT",
+  "author": "Screen Companion",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "screen",
+    "screenshot",
+    "companion"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "os": [
+    "win32"
+  ],
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "屏幕陪伴桌宠",
+    "tags": [
+      "screen",
+      "snapshot",
+      "companion"
+    ],
+    "describe": "describe.json"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "describe.json"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build:describe": "tsx scripts/build-describe.ts",
+    "describe:extension": "tsx scripts/build-describe.ts",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "dependencies": {
+    "jimp": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "cortico": "^0.2.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

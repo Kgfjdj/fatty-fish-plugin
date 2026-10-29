@@ -1,0 +1,52 @@
+{
+  "tools": [
+    {
+      "name": "screen_companion_look_now",
+      "description": "Take a fresh screenshot of the user's current screen and attach it to the receipt so you can see what they are looking at right now and answer their question about it. Use it when the user asks you to look at their screen, explain some text on it, or comment on the page they are viewing. Pass their question as `question` when there is one.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "Optional question from the user about the current screen, e.g. \"帮我解释屏幕上的这段文字\"."
+          }
+        }
+      },
+      "tags": [
+        "read",
+        "snapshot"
+      ],
+      "summary": {
+        "zh": "立刻截取当前屏幕，把截图作为图片附件交给模型，结合用户的问题回答。",
+        "en": "Takes a fresh screenshot of the current screen, attaches it to the receipt, and answers the user's question about it."
+      }
+    }
+  ],
+  "events": [
+    {
+      "type": "screen_companion.started",
+      "description": {
+        "zh": "World 挂载完成。",
+        "en": "The World was mounted."
+      },
+      "trigger": "flush"
+    },
+    {
+      "type": "screen_companion.observed",
+      "description": {
+        "zh": "自动观察到屏幕画面变化，附上当前截图。",
+        "en": "The screen changed; a fresh screenshot is attached."
+      },
+      "trigger": "debounce"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "worlds.screen-companion.envPrompt",
+      "title": "屏幕陪伴桌宠 · 环境提示词",
+      "role": "envPrompt",
+      "content": "你可以观察用户当前正在使用的屏幕画面。当前截取目标：{{screenCompanion.screen}}；截图最大宽度 {{screenCompanion.maxWidth}} 像素。\n\n## 两种观察方式\n\n1. **自动观察（{{screenCompanion.autoObserve}}）**：开启时，每 {{screenCompanion.captureIntervalMs}} 毫秒截一次屏比对画面，画面变化明显时，会把当前截图作为一条 `screen_companion.observed` 事件（图片附件）交给你。你结合画面与对话上下文，判断是否值得开口：画面里有用户可能想讨论、或值得你回应的内容时自然地说话，否则保持安静，不要为了说话而说话。\n\n2. **手动触发**：当用户主动请你「看看/观察当前屏幕」「解释屏幕上的这段文字」「这个页面怎么样」等时，调用 `screen_companion_look_now` 工具，把用户的问题放进 `question` 参数。用户没说具体问题、只是想让你看一眼时，可以不带 question。\n\n## 怎么理解截图\n\n- 截图代表**当前屏幕这一刻**的画面，不代表用户完整的浏览或阅读历史，不要把它当成用户的进度或既有知识。\n- 用户可能在微信读书、网页文章、GitHub、普通网页等任意场景，请按实际画面理解，不预设用户一定在阅读。\n- 得到截图后，结合当前对话上下文，自然地回答或描述。截图里没有的信息不要臆测。\n- 自动观察推送的截图，用户并没有显式提问；只有当你确实有基于画面的、有帮助的话要说时才开口。\n"
+    }
+  ]
+}
