@@ -1,10 +1,25 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import { Jimp } from 'jimp';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DeepPartial } from 'cortico/world.ts';
 import { SCREEN_COMPANION_DEFAULTS, type ScreenCompanionConfigSection, type ScreenRegion } from '../src/config.ts';
 import { ScreenCompanionWorld } from '../src/world.ts';
 import type { CapturedFrame } from '../src/capture.ts';
 import { makeFakeHost, type FakeStoreEvent } from './helpers/fake-host.ts';
+
+const tmpDirs: string[] = [];
+
+afterEach(() => {
+  for (const d of tmpDirs.splice(0)) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+});
 
 /** 造一张真实 JPEG，走通 resize/frameInfo 的完整路径。 */
 async function makeJpeg(width: number, height: number, color = 0xffffffff): Promise<Buffer> {
@@ -16,6 +31,7 @@ interface Rig {
   world: ScreenCompanionWorld;
   cfg: ScreenCompanionConfigSection;
   host: ReturnType<typeof makeFakeHost>;
+  dir: string;
   tool: (name?: string) => ReturnType<ScreenCompanionWorld['tools']>[0];
 }
 
@@ -28,9 +44,12 @@ function makeRig(
     acceptsImage?: boolean;
     now?: () => number;
     storeEvents?: FakeStoreEvent[];
+    dataDir?: string;
   } = {},
 ): Rig {
   const cfg: ScreenCompanionConfigSection = { ...SCREEN_COMPANION_DEFAULTS };
+  const dir = opts.dataDir ?? mkdtempSync(join(tmpdir(), 'sc-data-'));
+  if (!opts.dataDir) tmpDirs.push(dir);
   const host = makeFakeHost({ acceptsImage: opts.acceptsImage, storeEvents: opts.storeEvents });
   const world = new ScreenCompanionWorld({
     cfg,
@@ -41,11 +60,13 @@ function makeRig(
     persist: opts.persist,
     acceptsImage: opts.acceptsImage === undefined ? undefined : () => opts.acceptsImage!,
     now: opts.now,
+    dataDir: dir,
   });
   return {
     world,
     cfg,
     host,
+    dir,
     tool: (name = 'screen_companion_look_now') => world.tools().find((t) => t.name === name)!,
   };
 }
@@ -426,5 +447,118 @@ describe('短期观察记忆', () => {
     const out = await recent.handler({}, { role: 'test', log: rig.host.host.log });
     expect(String((out as { text: string }).text)).toContain('空');
     await rig.world.stop();
+  });
+});
+
+describe('中长期活动记忆', () => {
+  it('record 带活动字段后，list 能读回活动记录', async () => {
+    const rig = makeRig();
+    await rig.world.start(rig.host.host);
+    const record = rig.tool('screen_companion_memory_record');
+    const out = await record.handler(
+      {
+        summary: '正在读《三体》第二部，叶文洁与罗辑的线索逐渐交汇。',
+        sceneType: 'reading',
+        sceneLabel: '三体',
+        activityKind: 'book',
+        activityTitle: '三体',
+        activityAction: 'reading',
+        activityConfidence: 'high',
+      },
+      { role: 'test', log: rig.host.host.log },
+    );
+    expect((out as { failed?: true }).failed).toBeUndefined();
+    const list = rig.tool('screen_companion_memory_list');
+    const listOut = await list.handler({}, { role: 'test', log: rig.host.host.log });
+    expect(String((listOut as { text: string }).text)).toContain('三体');
+    expect(String((listOut as { text: string }).text)).toContain('中期');
+    await rig.world.stop();
+  });
+
+  it('关闭中长期记忆后，record 不写活动记忆', async () => {
+    const rig = makeRig();
+    rig.cfg.activityMemoryEnabled = false;
+    await rig.world.start(rig.host.host);
+    const record = rig.tool('screen_companion_memory_record');
+    await record.handler(
+      { summary: '正在读《三体》第二部，内容很精彩。', activityKind: 'book', activityTitle: '三体', activityConfidence: 'high' },
+      { role: 'test', log: rig.host.host.log },
+    );
+    const list = rig.tool('screen_companion_memory_list');
+    const listOut = await list.handler({}, { role: 'test', log: rig.host.host.log });
+    expect(String((listOut as { text: string }).text)).toContain('空');
+    await rig.world.stop();
+  });
+
+  it('recall 按名称检索，forget 按 id 删除', async () => {
+    const rig = makeRig();
+    await rig.world.start(rig.host.host);
+    const record = rig.tool('screen_companion_memory_record');
+    await record.handler(
+      { summary: '开发屏幕陪伴插件的记忆模块。', activityKind: 'project', activityTitle: 'fatty-fish-plugin', activityConfidence: 'high' },
+      { role: 'test', log: rig.host.host.log },
+    );
+    const recall = rig.tool('screen_companion_memory_recall');
+    const recOut = await recall.handler({ query: 'fatty' }, { role: 'test', log: rig.host.host.log });
+    expect(String((recOut as { text: string }).text)).toContain('fatty-fish-plugin');
+
+    const list = rig.tool('screen_companion_memory_list');
+    const listOut = await list.handler({}, { role: 'test', log: rig.host.host.log });
+    const m = String((listOut as { text: string }).text).match(/act-[0-9a-f]+/);
+    expect(m).toBeTruthy();
+    const forget = rig.tool('screen_companion_memory_forget');
+    const forgetOut = await forget.handler({ id: m![0] }, { role: 'test', log: rig.host.host.log });
+    expect(String((forgetOut as { text: string }).text)).toContain('已删除');
+    const list2Out = await list.handler({}, { role: 'test', log: rig.host.host.log });
+    expect(String((list2Out as { text: string }).text)).toContain('空');
+    await rig.world.stop();
+  });
+
+  it('活动记忆持久化：重启后仍能读回', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sc-persist-'));
+    tmpDirs.push(dir);
+    const rig = makeRig({ dataDir: dir });
+    await rig.world.start(rig.host.host);
+    const record = rig.tool('screen_companion_memory_record');
+    await record.handler(
+      { summary: '正在读《三体》第二部，线索交汇。', activityKind: 'book', activityTitle: '三体', activityConfidence: 'high' },
+      { role: 'test', log: rig.host.host.log },
+    );
+    await rig.world.stop();
+
+    const rig2 = makeRig({ dataDir: dir });
+    await rig2.world.start(rig2.host.host);
+    const list = rig2.tool('screen_companion_memory_list');
+    const listOut = await list.handler({}, { role: 'test', log: rig2.host.host.log });
+    expect(String((listOut as { text: string }).text)).toContain('三体');
+    await rig2.world.stop();
+  });
+
+  it('观察事件正文附上中长期活动记忆', async () => {
+    vi.useFakeTimers();
+    const red = await makeJpeg(800, 600, 0xff0000ff);
+    const blue = await makeJpeg(800, 600, 0x0000ffff);
+    const frames = [red, blue];
+    let i = 0;
+    let clock = 0;
+    const rig = makeRig({
+      capture: async () => ({ bytes: frames[i++ % frames.length], mime: 'image/jpeg' }),
+      now: () => clock,
+    });
+    await rig.world.start(rig.host.host);
+    const record = rig.tool('screen_companion_memory_record');
+    await record.handler(
+      { summary: '正在读《三体》第二部，线索交汇。', activityKind: 'book', activityTitle: '三体', activityConfidence: 'high' },
+      { role: 'test', log: rig.host.host.log },
+    );
+    await vi.advanceTimersByTimeAsync(3000);
+    clock = 30000;
+    await vi.advanceTimersByTimeAsync(3000);
+    await rig.world.stop();
+    vi.useRealTimers();
+    const observed = rig.host.events.filter((e) => e.event.type === 'screen_companion.observed');
+    expect(observed).toHaveLength(1);
+    expect(observed[0].event.text).toContain('中长期活动记忆');
+    expect(observed[0].event.text).toContain('三体');
   });
 });

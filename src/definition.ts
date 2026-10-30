@@ -7,7 +7,7 @@ export const SCREEN_COMPANION: WorldDefinition<ScreenCompanionConfigSection> = {
   label: '屏幕陪伴桌宠',
   defaults: () => ({ ...SCREEN_COMPANION_DEFAULTS }),
   // `ctx.cfg` 是 `worlds.screen-companion` 的活引用:热改的键现读即生效。
-  create: (ctx) => new ScreenCompanionWorld({ cfg: ctx.cfg, timezone: ctx.timezone, persist: (patch) => ctx.persist(patch) }),
+  create: (ctx) => new ScreenCompanionWorld({ cfg: ctx.cfg, timezone: ctx.timezone, dataDir: ctx.dataDir, persist: (patch) => ctx.persist(patch) }),
   // 自描述:可能出现的全部工具与会推出的全部事件,不进提示词。
   describe: {
     tools: describeTools(SCREEN_COMPANION_TOOL_DECLS, {
@@ -34,6 +34,18 @@ export const SCREEN_COMPANION: WorldDefinition<ScreenCompanionConfigSection> = {
       screen_companion_memory_clear: {
         zh: '清空本插件的短期观察记忆。',
         en: 'Clears all short-term observation memory.',
+      },
+      screen_companion_memory_list: {
+        zh: '列出中长期活动记忆（最近做过的书/文章/视频/项目），最新在前。',
+        en: 'Lists the medium/long-term activity memories, newest first.',
+      },
+      screen_companion_memory_recall: {
+        zh: '按类别、名称或文字检索中长期活动记忆，回忆用户以前做过什么。',
+        en: 'Searches medium/long-term activity memories by kind, title or text.',
+      },
+      screen_companion_memory_forget: {
+        zh: '按 id 删除一条错误的中长期活动记忆。',
+        en: 'Deletes one medium/long-term activity memory by id.',
       },
     }),
     events: [

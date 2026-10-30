@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+三层动态记忆（短期 + 中期 + 长期）：
+
+- 新增 `src/activity-memory.ts`：中长期活动记忆管理器。基于既有截图视觉理解结果沉淀「最近 72 小时做过什么」的中期活动记忆，同一活动在滚动 72 小时窗口内达到 3 次独立会话后晋升长期（30 天）；长期满期未再出现时高价值压缩为一句历史概括、低价值删除，压缩概括再保留一段时间后删除。
+- 活动身份按「类型 + 可辨认对象名」合并，不凭模糊标题制造精确身份；同一截图（observationId）幂等，连续截图/连续翻页只算一次会话（会话间隔默认 30 分钟，可配置）。
+- 中长期记忆持久化到插件本地 JSON 文件（`activity-memory.json`），重启后恢复并在启动时做过期清理；不保存原始截图，只保存模型描述的活动事实。
+- 复用 `screen_companion_memory_record`：模型写短期摘要时可额外提交 `activityKind` / `activityTitle` / `activityAction` / `activityConfidence`，一次写入同时沉淀短期 + 中长期，避免两套写入。
+- 新增三个工具：`screen_companion_memory_list`（列出各阶段活动记录）、`screen_companion_memory_recall`（按类别/名称/文字检索）、`screen_companion_memory_forget`（按 id 删除错误记忆）。
+- 观察回执与 `screen_companion.observed` 事件正文自动附上近期的中长期活动记忆，帮助桌宠接续与回忆。
+- 新增 7 个配置项（`activityMemoryEnabled`、`mediumMemoryHours`、`activitySessionGapMinutes`、`longPromotionSessions`、`longMemoryDays`、`compressedRetentionDays`、`activityMemoryMaxItems`），在独立的「中长期记忆」配置页管理。
+- 时间戳、会话计数、晋升、过期、压缩与持久化全部由代码处理，使用可注入时钟；模型只负责描述活动。
+- 新增 `tests/activity-memory.test.ts` 与 `tests/world.test.ts` 中的中长期记忆集成测试。
+
 ## 0.3.0
 
 短期观察记忆（short-term observation memory）：

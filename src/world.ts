@@ -13,6 +13,7 @@ import type { DeepPartial } from 'cortico/world.ts';
 import {
   SCREEN_COMPANION_CONFIG_GROUP,
   SCREEN_COMPANION_MEMORY_CONFIG_GROUP,
+  SCREEN_COMPANION_ACTIVITY_MEMORY_CONFIG_GROUP,
   SCREEN_COMPANION_ID,
   type ActivityLevel,
   type ScreenCompanionConfigSection,
@@ -21,6 +22,14 @@ import {
 import { captureRegion, captureScreen, frameInfo, resizeToMaxWidth, selectRegion, type CapturedFrame } from './capture.ts';
 import { MotionSentinel } from './sentinel.ts';
 import { MemoryManager, SCENE_TYPE_LABEL, type MemoryLimits } from './memory.ts';
+import {
+  ActivityMemoryStore,
+  ACTIVITY_KIND_LABEL,
+  ACTIVITY_TIER_LABEL,
+  type ActivityKind,
+  type ActivityMemoryLimits,
+  type Confidence,
+} from './activity-memory.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
@@ -47,6 +56,8 @@ export interface ScreenCompanionWorldOptions {
   acceptsImage?: () => boolean;
   /** 时钟，测试可注入。 */
   now?: () => number;
+  /** 插件本地数据目录，用于中长期活动记忆落盘；缺省 '.'（测试注入临时目录）。 */
+  dataDir?: string;
 }
 
 /** 全部工具的声明；定义里的 describe 与 `tools()` 都取它。 */
@@ -84,7 +95,7 @@ export const SCREEN_COMPANION_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>
   {
     name: 'screen_companion_memory_record',
     description:
-      'Save a short structured summary of what you just saw in a screenshot into the companion\'s short-term memory, so later observations can continue the same book/video/project without losing the thread. Call it after you actually look at a screenshot and find content worth remembering — even if you choose not to comment on it. Pass the `observationId` shown in the screenshot text when present; otherwise omit it and the summary is associated with the most recent observation.',
+      'Save a short structured summary of what you just saw in a screenshot into the companion\'s short-term memory, so later observations can continue the same book/video/project without losing the thread. Call it after you actually look at a screenshot and find content worth remembering — even if you choose not to comment on it. Pass the `observationId` shown in the screenshot text when present; otherwise omit it and the summary is associated with the most recent observation. If the frame clearly shows a recognizable ongoing activity (a book/article/video/project the user is reading, watching or working on), also fill in the optional `activity*` fields so the same observation feeds medium/long-term activity memory.',
     tags: ['write'],
     parameters: {
       type: 'object',
@@ -106,6 +117,22 @@ export const SCREEN_COMPANION_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>
         observationId: {
           type: 'string',
           description: 'Optional observation id shown in the screenshot text; omit to attach to the latest observation.',
+        },
+        activityKind: {
+          type: 'string',
+          description: 'Optional recognizable activity kind for medium/long-term memory: book / article / video / project / other. Omit if the activity is not clearly identifiable.',
+        },
+        activityTitle: {
+          type: 'string',
+          description: 'Optional name of the book/article/video/project for medium/long-term memory. Required to form a precise activity identity; omit instead of guessing.',
+        },
+        activityAction: {
+          type: 'string',
+          description: 'Optional action, e.g. reading / browsing / watching / working. Defaults by kind.',
+        },
+        activityConfidence: {
+          type: 'string',
+          description: 'Optional confidence in the activity identification: high / medium / low. low is not stored in medium/long-term memory.',
         },
       },
     },
@@ -130,6 +157,42 @@ export const SCREEN_COMPANION_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>
     tags: ['write'],
     parameters: { type: 'object', additionalProperties: false, properties: {} },
   },
+  {
+    name: 'screen_companion_memory_list',
+    description:
+      'List the medium/long-term activity memories (books/articles/videos/projects the user has been engaged with), newest first, so you can recall what they have been doing recently.',
+    tags: ['read', 'snapshot'],
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'screen_companion_memory_recall',
+    description:
+      'Search the medium/long-term activity memories by kind, title or text. Use it when the user asks about something they did before ("what was I reading last week?") or when a familiar book/project reappears.',
+    tags: ['read', 'snapshot'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: {
+        query: { type: 'string', description: 'Search terms, e.g. a book/project name or keywords.' },
+        limit: { type: 'integer', description: 'Max results (default 5).' },
+      },
+    },
+  },
+  {
+    name: 'screen_companion_memory_forget',
+    description:
+      'Delete one medium/long-term activity memory by its id (from screen_companion_memory_list). Use it when a remembered activity is wrong or unwanted.',
+    tags: ['write'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id'],
+      properties: {
+        id: { type: 'string', description: 'The activity memory id to delete.' },
+      },
+    },
+  },
 ];
 
 export class ScreenCompanionWorld implements World {
@@ -141,6 +204,7 @@ export class ScreenCompanionWorld implements World {
   private busy = false;
   private lastPushAt = 0;
   private readonly memory = new MemoryManager();
+  private activityMemory: ActivityMemoryStore | null = null;
   private observationSeq = 0;
   private lastObservationId: string | null = null;
   private lastTurnCursor = 0;
@@ -182,6 +246,17 @@ export class ScreenCompanionWorld implements World {
     };
   }
 
+  private activityMemoryLimits(): ActivityMemoryLimits {
+    return {
+      mediumHours: this.cfg.mediumMemoryHours,
+      sessionGapMs: this.cfg.activitySessionGapMinutes * 60_000,
+      promotionSessions: this.cfg.longPromotionSessions,
+      longDays: this.cfg.longMemoryDays,
+      compressedDays: this.cfg.compressedRetentionDays,
+      maxItems: this.cfg.activityMemoryMaxItems,
+    };
+  }
+
   private nextObservationId(): string {
     this.observationSeq += 1;
     return `obs-${this.observationSeq}`;
@@ -210,6 +285,11 @@ export class ScreenCompanionWorld implements World {
       'screenCompanion.shortMemoryEnabled': this.cfg.shortMemoryEnabled ? '开启' : '关闭',
       'screenCompanion.memoryMaxTurns': String(this.cfg.memoryMaxTurns),
       'screenCompanion.memoryTtlMinutes': String(this.cfg.memoryTtlMinutes),
+      'screenCompanion.activityMemoryEnabled': this.cfg.activityMemoryEnabled ? '开启' : '关闭',
+      'screenCompanion.mediumMemoryHours': String(this.cfg.mediumMemoryHours),
+      'screenCompanion.activitySessionGapMinutes': String(this.cfg.activitySessionGapMinutes),
+      'screenCompanion.longPromotionSessions': String(this.cfg.longPromotionSessions),
+      'screenCompanion.longMemoryDays': String(this.cfg.longMemoryDays),
     };
   }
 
@@ -230,7 +310,16 @@ export class ScreenCompanionWorld implements World {
       if (decl.name === 'screen_companion_memory_recent') {
         return { ...decl, handler: async (args: Record<string, unknown>) => this.memoryRecentTool(args) };
       }
-      return { ...decl, handler: async () => this.memoryClearTool() };
+      if (decl.name === 'screen_companion_memory_clear') {
+        return { ...decl, handler: async () => this.memoryClearTool() };
+      }
+      if (decl.name === 'screen_companion_memory_list') {
+        return { ...decl, handler: async () => this.activityMemoryListTool() };
+      }
+      if (decl.name === 'screen_companion_memory_recall') {
+        return { ...decl, handler: async (args: Record<string, unknown>) => this.activityMemoryRecallTool(args) };
+      }
+      return { ...decl, handler: async (args: Record<string, unknown>) => this.activityMemoryForgetTool(args) };
     });
   }
 
@@ -245,7 +334,7 @@ export class ScreenCompanionWorld implements World {
             : '自动观察关闭，仅手动触发',
         },
       ],
-      config: [SCREEN_COMPANION_CONFIG_GROUP, SCREEN_COMPANION_MEMORY_CONFIG_GROUP],
+      config: [SCREEN_COMPANION_CONFIG_GROUP, SCREEN_COMPANION_MEMORY_CONFIG_GROUP, SCREEN_COMPANION_ACTIVITY_MEMORY_CONFIG_GROUP],
       promptDocs: [
         {
           key: `worlds.${SCREEN_COMPANION_ID}.envPrompt`,
@@ -264,6 +353,11 @@ export class ScreenCompanionWorld implements World {
             { name: 'screenCompanion.shortMemoryEnabled', description: '短期观察记忆是否开启。' },
             { name: 'screenCompanion.memoryMaxTurns', description: '摘要保留的轮数上限。' },
             { name: 'screenCompanion.memoryTtlMinutes', description: '摘要保留的时间上限（分钟）。' },
+            { name: 'screenCompanion.activityMemoryEnabled', description: '中长期活动记忆是否开启。' },
+            { name: 'screenCompanion.mediumMemoryHours', description: '中期记忆窗口（小时）。' },
+            { name: 'screenCompanion.activitySessionGapMinutes', description: '活动会话间隔（分钟）。' },
+            { name: 'screenCompanion.longPromotionSessions', description: '晋升长期所需独立会话数。' },
+            { name: 'screenCompanion.longMemoryDays', description: '长期记忆保留天数。' },
           ],
         },
       ],
@@ -272,6 +366,9 @@ export class ScreenCompanionWorld implements World {
 
   async start(host: WorldHost): Promise<void> {
     this.host = host;
+    // 中长期活动记忆：从插件本地数据目录加载，启动时做一次过期清理。
+    this.activityMemory = new ActivityMemoryStore(this.opts.dataDir ?? '.', { now: () => this.now() });
+    this.activityMemory.cleanup(this.activityMemoryLimits(), this.now());
     // 轮数计数从当前事件尾开始，不回灌历史。
     try {
       this.lastTurnCursor = host.store?.latestCursor?.() ?? 0;
@@ -365,7 +462,8 @@ export class ScreenCompanionWorld implements World {
           text:
             `用户当前屏幕（${screenLabel}）画面有了变化，这是刚刚截取的一帧（观察 ID：${observationId}）。` +
             `${ACTIVITY_NUDGE[this.cfg.activity]}这只是此刻的一次观察，不代表用户完整的浏览或阅读历史。` +
-            this.buildMemoryContext(),
+            this.buildMemoryContext() +
+            this.buildActivityMemoryContext(),
           blobs: [
             {
               bytes: resized.bytes,
@@ -404,7 +502,8 @@ export class ScreenCompanionWorld implements World {
         `${head}\n` +
         `以下是当前屏幕的一次截图（${info.width}×${info.height}，${screenLabel}，观察 ID：${observationId}）。` +
         '这只是此刻的一次观察，不代表用户完整的浏览或阅读历史；请只根据画面与上下文回答。' +
-        this.buildMemoryContext();
+        this.buildMemoryContext() +
+        this.buildActivityMemoryContext();
       return {
         text,
         blobs: [
@@ -445,33 +544,66 @@ export class ScreenCompanionWorld implements World {
     return { text: '已取消自定义区域，恢复全屏截图。' };
   }
 
-  /** screen_companion_memory_record：把模型对当前截图的摘要写回短期记忆。 */
+  /** screen_companion_memory_record：把模型对当前截图的摘要写回短期记忆，并可选沉淀中长期活动记忆。 */
   private async memoryRecordTool(args: Record<string, unknown>): Promise<ToolOutcome> {
     if (!this.host) return fail('World 未挂载，无法记录记忆。');
-    if (!this.cfg.shortMemoryEnabled) return { text: '短期记忆已关闭，未记录。' };
     const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
     if (!summary) return fail('缺少 summary（本次画面的内容摘要）。');
     const observationId =
       typeof args.observationId === 'string' && args.observationId.trim()
         ? args.observationId.trim()
         : (this.lastObservationId ?? undefined);
-    const result = this.memory.record(
-      {
-        observationId,
-        sceneType: typeof args.sceneType === 'string' ? args.sceneType : undefined,
-        sceneLabel: typeof args.sceneLabel === 'string' ? args.sceneLabel : undefined,
-        summary,
-      },
-      this.memoryLimits(),
-      this.currentTurn,
-      this.now(),
-    );
-    if (result.outcome === 'skipped') {
-      return fail(result.reason === 'empty' ? '摘要为空，未记录。' : '摘要过短，未记录。');
+
+    const parts: string[] = [];
+
+    // 短期观察摘要（沿用 v0.3）。
+    if (this.cfg.shortMemoryEnabled) {
+      const result = this.memory.record(
+        {
+          observationId,
+          sceneType: typeof args.sceneType === 'string' ? args.sceneType : undefined,
+          sceneLabel: typeof args.sceneLabel === 'string' ? args.sceneLabel : undefined,
+          summary,
+        },
+        this.memoryLimits(),
+        this.currentTurn,
+        this.now(),
+      );
+      if (result.outcome === 'skipped') {
+        parts.push(result.reason === 'empty' ? '短期摘要为空未记录' : '短期摘要过短未记录');
+      } else {
+        const label = result.sceneLabel ? `「${result.sceneLabel}」` : SCENE_TYPE_LABEL[result.sceneType];
+        const verb = result.outcome === 'updated' ? '已更新' : '已记录';
+        parts.push(`${verb}短期观察摘要（场景 ${label}，观察 ${observationId ?? '最近一次'}）：${summary.slice(0, 80)}`);
+      }
     }
-    const label = result.sceneLabel ? `「${result.sceneLabel}」` : SCENE_TYPE_LABEL[result.sceneType];
-    const verb = result.outcome === 'updated' ? '已更新' : '已记录';
-    return { text: `${verb}短期观察摘要（场景 ${label}，观察 ${observationId ?? '最近一次'}）：${summary.slice(0, 80)}` };
+
+    // 中长期活动记忆：模型额外描述了可辨认的活动（类型 + 名称）。
+    if (this.cfg.activityMemoryEnabled && this.activityMemory && typeof args.activityKind === 'string' && args.activityKind.trim()) {
+      const title = typeof args.activityTitle === 'string' ? args.activityTitle.trim() : undefined;
+      const result = this.activityMemory.observe(
+        {
+          observationId,
+          kind: args.activityKind as ActivityKind,
+          title,
+          action: typeof args.activityAction === 'string' ? args.activityAction.trim() : undefined,
+          summary,
+          confidence: args.activityConfidence as Confidence | undefined,
+        },
+        this.activityMemoryLimits(),
+        this.now(),
+      );
+      if (result.outcome === 'added' || result.outcome === 'updated' || result.outcome === 'promoted') {
+        const tier = ACTIVITY_TIER_LABEL[result.tier!];
+        const verb = result.outcome === 'added' ? '新增中期' : result.outcome === 'promoted' ? '晋升长期' : '更新';
+        parts.push(`活动记忆${verb}（${tier}「${title ?? ''}」）`);
+      } else if (result.outcome === 'duplicate') {
+        parts.push('活动记忆已存在（同一观察，不重复计数）');
+      }
+    }
+
+    if (!parts.length) return { text: '记忆已关闭，未记录。' };
+    return { text: parts.join('；') };
   }
 
   /** screen_companion_memory_recent：读取当前/指定场景的有效摘要。 */
@@ -496,6 +628,49 @@ export class ScreenCompanionWorld implements World {
     return { text: '已清空短期观察记忆。' };
   }
 
+  /** screen_companion_memory_list：列出中长期活动记忆。 */
+  private async activityMemoryListTool(): Promise<ToolOutcome> {
+    if (!this.host) return fail('World 未挂载，无法读取活动记忆。');
+    if (!this.activityMemory) return fail('活动记忆未初始化。');
+    const items = this.activityMemory.list();
+    if (!items.length) return { text: '中长期活动记忆为空。' };
+    const lines = items.map((it) => {
+      const tier = ACTIVITY_TIER_LABEL[it.tier];
+      const kind = ACTIVITY_KIND_LABEL[it.kind];
+      const last = ago(this.now() - it.lastSeenAt);
+      return `- [${tier}] ${it.id} · ${kind}《${it.title}》· ${it.action} · 最近 ${last} · 观察 ${it.evidenceCount} 次`;
+    });
+    return { text: `中长期活动记忆（${items.length} 条，最新在前）：\n${lines.join('\n')}` };
+  }
+
+  /** screen_companion_memory_recall：按类别/名称/文字检索中长期活动记忆。 */
+  private async activityMemoryRecallTool(args: Record<string, unknown>): Promise<ToolOutcome> {
+    if (!this.host) return fail('World 未挂载，无法检索活动记忆。');
+    if (!this.activityMemory) return fail('活动记忆未初始化。');
+    const query = typeof args.query === 'string' ? args.query.trim() : '';
+    if (!query) return fail('缺少 query（检索词）。');
+    const limit = Math.min(20, Math.max(1, Number(args.limit) || 5));
+    const items = this.activityMemory.recall(query, limit);
+    if (!items.length) return { text: `没有匹配「${query}」的中长期活动记忆。` };
+    const lines = items.map((it) => {
+      const tier = ACTIVITY_TIER_LABEL[it.tier];
+      const kind = ACTIVITY_KIND_LABEL[it.kind];
+      return `- [${tier}] ${kind}《${it.title}》：${it.summary}`;
+    });
+    return { text: `命中 ${items.length} 条：\n${lines.join('\n')}` };
+  }
+
+  /** screen_companion_memory_forget：按 id 删除一条错误的活动记忆。 */
+  private async activityMemoryForgetTool(args: Record<string, unknown>): Promise<ToolOutcome> {
+    if (!this.host) return fail('World 未挂载，无法删除活动记忆。');
+    if (!this.activityMemory) return fail('活动记忆未初始化。');
+    const id = typeof args.id === 'string' ? args.id.trim() : '';
+    if (!id) return fail('缺少 id（要删除的活动记忆 id）。');
+    return this.activityMemory.forget(id)
+      ? { text: `已删除活动记忆 ${id}。` }
+      : { text: `未找到活动记忆 ${id}。` };
+  }
+
   /** 当前场景最近摘要的注入文本；关闭或为空时返回空串。 */
   private buildMemoryContext(): string {
     if (!this.cfg.shortMemoryEnabled) return '';
@@ -508,6 +683,19 @@ export class ScreenCompanionWorld implements World {
     const text = lines.join('\n');
     const capped = text.length > 800 ? `${text.slice(0, 800)}…` : text;
     return `\n[短期观察记忆] 你此前看过（供连续讨论，不确定处用「可能/似乎」表达）：\n${capped}`;
+  }
+
+  /** 近期中长期活动记忆的注入文本；关闭或为空时返回空串。 */
+  private buildActivityMemoryContext(): string {
+    if (!this.cfg.activityMemoryEnabled || !this.activityMemory) return '';
+    const items = this.activityMemory.list().slice(0, 3);
+    if (!items.length) return '';
+    const lines = items.map((it) => {
+      const kind = ACTIVITY_KIND_LABEL[it.kind];
+      const tier = ACTIVITY_TIER_LABEL[it.tier];
+      return `- ${kind}《${it.title}》（${tier}）：${it.summary.slice(0, 60)}`;
+    });
+    return `\n[中长期活动记忆] 用户近期的活动（供接续与回忆，不确定处用「可能/似乎」表达）：\n${lines.join('\n')}`;
   }
 
   private acceptsImage(): boolean {
@@ -523,4 +711,12 @@ export class ScreenCompanionWorld implements World {
 
 function fail(text: string): ToolOutcome {
   return { text, failed: true };
+}
+
+/** 把毫秒间隔转成中文的相对时间，供活动记忆列表展示。 */
+function ago(ms: number): string {
+  if (ms < 60_000) return '刚刚';
+  if (ms < 3600_000) return `${Math.floor(ms / 60_000)} 分钟前`;
+  if (ms < 24 * 3600_000) return `${Math.floor(ms / 3600_000)} 小时前`;
+  return `${Math.floor(ms / (24 * 3600_000))} 天前`;
 }

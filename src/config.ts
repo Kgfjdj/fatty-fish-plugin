@@ -47,6 +47,20 @@ export interface ScreenCompanionConfigSection extends WorldSection {
   memoryMaxEntriesPerScene: number;
   /** 最多保留的场景数；热改。 */
   memoryMaxScenes: number;
+  /** 中长期活动记忆开关：开启后把可辨认的活动沉淀为中期/长期活动记忆并持久化；热改。 */
+  activityMemoryEnabled: boolean;
+  /** 中期记忆窗口（小时）：晋升判断与中期过期都用这个滚动窗口；热改。 */
+  mediumMemoryHours: number;
+  /** 两次有效观察间隔超过该分钟数即视为一次新的活动会话；热改。 */
+  activitySessionGapMinutes: number;
+  /** 滚动窗口内达到该独立会话次数才晋升为长期记忆；热改。 */
+  longPromotionSessions: number;
+  /** 长期记忆保留天数，满期未再出现触发压缩/删除；热改。 */
+  longMemoryDays: number;
+  /** 压缩概括再保留的天数，仍无再次出现则删除；热改。 */
+  compressedRetentionDays: number;
+  /** 全部活动记忆条数上限，超出淘汰最久未更新；热改。 */
+  activityMemoryMaxItems: number;
 }
 
 export const SCREEN_COMPANION_DEFAULTS: ScreenCompanionConfigSection = {
@@ -65,6 +79,13 @@ export const SCREEN_COMPANION_DEFAULTS: ScreenCompanionConfigSection = {
   memoryTtlMinutes: 60,
   memoryMaxEntriesPerScene: 5,
   memoryMaxScenes: 3,
+  activityMemoryEnabled: true,
+  mediumMemoryHours: 72,
+  activitySessionGapMinutes: 30,
+  longPromotionSessions: 3,
+  longMemoryDays: 30,
+  compressedRetentionDays: 30,
+  activityMemoryMaxItems: 300,
 };
 
 const K = `worlds.${SCREEN_COMPANION_ID}`;
@@ -194,6 +215,79 @@ export const SCREEN_COMPANION_MEMORY_CONFIG_GROUP: ConfigGroup = {
         minimum: 1,
         maximum: 5,
         'x-suffix': '个',
+        'x-hot': true,
+      },
+    },
+  },
+};
+
+/** 中长期活动记忆的配置组：与短期记忆分开，独立成一块。 */
+export const SCREEN_COMPANION_ACTIVITY_MEMORY_CONFIG_GROUP: ConfigGroup = {
+  id: `world:${SCREEN_COMPANION_ID}.activity-memory`,
+  owner: `world:${SCREEN_COMPANION_ID}`,
+  schema: {
+    type: 'object',
+    title: '中长期记忆',
+    description: '中长期活动记忆：把可辨认的活动（同一本书/文章/视频/项目）沉淀为中期（72 小时）与长期（30 天）活动记录，持久化到插件本地数据文件，重启后恢复；不保存原始截图。',
+    properties: {
+      [`${K}.activityMemoryEnabled`]: {
+        type: 'boolean',
+        title: '启用中长期记忆',
+        description: '开启后，模型在写短期摘要时可额外描述活动（类型/名称/动作/置信度），代码据此沉淀中期记忆，并在多次重访后晋升为长期记忆；关闭后不再记录或注入。',
+        'x-hot': true,
+      },
+      [`${K}.mediumMemoryHours`]: {
+        type: 'integer',
+        title: '中期窗口（小时）',
+        description: '中期记忆的滚动窗口：晋升判断只统计此刻往前这么多小时内的独立会话，中期记录距最后观察超过该时长也会被清理。',
+        minimum: 1,
+        maximum: 168,
+        'x-suffix': 'h',
+        'x-hot': true,
+      },
+      [`${K}.activitySessionGapMinutes`]: {
+        type: 'integer',
+        title: '会话间隔（分钟）',
+        description: '同一活动两次有效观察间隔超过该分钟数，视为一次新的活动会话；连续截图/连续翻页不增加会话数。',
+        minimum: 5,
+        maximum: 1440,
+        'x-suffix': 'min',
+        'x-hot': true,
+      },
+      [`${K}.longPromotionSessions`]: {
+        type: 'integer',
+        title: '晋升所需会话数',
+        description: '同一活动在滚动窗口内达到该独立会话次数后，自动晋升为长期记忆。',
+        minimum: 2,
+        maximum: 10,
+        'x-suffix': '次',
+        'x-hot': true,
+      },
+      [`${K}.longMemoryDays`]: {
+        type: 'integer',
+        title: '长期保留（天）',
+        description: '长期记忆距最后观察满该天数后触发压缩/删除：高价值压缩为一句概括，低价值直接删除。',
+        minimum: 7,
+        maximum: 365,
+        'x-suffix': '天',
+        'x-hot': true,
+      },
+      [`${K}.compressedRetentionDays`]: {
+        type: 'integer',
+        title: '压缩概括再保留（天）',
+        description: '压缩后的历史概括再保留的天数，仍无再次出现则删除，避免无限积累。',
+        minimum: 7,
+        maximum: 365,
+        'x-suffix': '天',
+        'x-hot': true,
+      },
+      [`${K}.activityMemoryMaxItems`]: {
+        type: 'integer',
+        title: '活动条数上限',
+        description: '全部中长期活动记忆的最大条数，超出淘汰最久未更新的。',
+        minimum: 10,
+        maximum: 2000,
+        'x-suffix': '条',
         'x-hot': true,
       },
     },
